@@ -16,7 +16,7 @@ import {
   type SliderControl,
 } from './dom';
 
-export type SourceMode = 'synth' | 'file' | 'mic';
+export type SourceMode = 'synth' | 'file' | 'spotify' | 'mic';
 
 interface ToggleControl {
   root: HTMLButtonElement;
@@ -66,6 +66,15 @@ export interface PanelApi {
   setTripBias(v: number): void;
 
   palette(): RGB[];
+
+  cinematic(): boolean;
+  setCinematic(v: boolean): void;
+  bokeh(): number;
+  setBokeh(v: number): void;
+  shutter(): number;
+  setShutter(v: number): void;
+  setLetterbox(v: number): void;
+
   toast(message: string): void;
 }
 
@@ -163,19 +172,20 @@ export class Panel {
 
     const srcRow = row('AUDIO SOURCE');
     this.sourceChips = chips<SourceMode>(
-      ['synth', 'file', 'mic'],
+      ['synth', 'file', 'spotify', 'mic'],
       api.sourceMode(),
       (m) => {
         api.setSourceMode(m);
         this.refresh();
       },
-      (m) => (m === 'synth' ? 'SYNTH ENGINE' : m.toUpperCase()),
+      (m) => (m === 'synth' ? 'SYNTH ENGINE' : m === 'spotify' ? 'SPOTIFY' : m.toUpperCase()),
     );
     srcRow.root.appendChild(this.sourceChips.root);
     deck.appendChild(srcRow.root);
 
     // File drop target, plus TAP/ALIGN for the analysis modes.
     const drop = el('div', 'filedrop', 'drop an audio file here, or click to browse');
+    this.fileDrop = drop;
     const fileInput = el('input');
     fileInput.type = 'file';
     fileInput.accept = 'audio/*';
@@ -210,8 +220,19 @@ export class Panel {
       beatTools.appendChild(b);
     }
 
+    const loopbackHelp = el('div', 'note');
+    loopbackHelp.innerHTML =
+      'Spotify\u2019s own audio is DRM-protected and its beat-analysis API was retired in 2024, ' +
+      'so the only way in is to capture what your machine is playing:<br>' +
+      '<b>1.</b> install a loopback device \u2014 BlackHole (macOS), VB-Cable (Windows), ' +
+      'or PulseAudio\u2019s monitor source (Linux)<br>' +
+      '<b>2.</b> set it as your system output, then pick it when the browser asks for a microphone<br>' +
+      '<b>3.</b> press play in Spotify \u2014 the rig locks on within a few bars<br>' +
+      'No loopback device? Selecting your actual microphone still works if the music is loud enough.';
+    this.loopbackHelp = loopbackHelp;
+
     const inputSection = el('div', 'row');
-    inputSection.append(drop, fileInput, this.inputLabelEl, beatTools);
+    inputSection.append(drop, fileInput, loopbackHelp, this.inputLabelEl, beatTools);
     deck.appendChild(inputSection);
     this.inputSection = inputSection;
 
@@ -378,6 +399,35 @@ export class Panel {
     }, (v) => v.toFixed(2));
     console_.appendChild(haze.root);
 
+    const filmToggle = toggleChip('FILM LOOK', api.cinematic(), (v) => {
+      api.setCinematic(v);
+      api.toast(v ? 'lens, matte and grain on' : 'clean render');
+    });
+    console_.appendChild(filmToggle.root);
+    this.filmToggle = filmToggle;
+
+    const bokeh = slider('DEPTH OF FIELD', 0, 30, 0.5, api.bokeh(), (v) => api.setBokeh(v), (v) =>
+      v < 0.5 ? 'DEEP FOCUS' : `${v.toFixed(0)}px`,
+    );
+    console_.appendChild(bokeh.root);
+    this.bokehSlider = bokeh;
+
+    const shutter = slider('MOTION BLUR', 0, 1.5, 0.01, api.shutter(), (v) => api.setShutter(v), (v) =>
+      v < 0.01 ? 'OFF' : v.toFixed(2),
+    );
+    console_.appendChild(shutter.root);
+    this.shutterSlider = shutter;
+
+    const matte = chips(
+      ['off', '2.39', '1.85', '1.33'],
+      '2.39',
+      (v) => api.setLetterbox(v === 'off' ? 0 : Number(v)),
+      (v) => (v === 'off' ? 'FULL FRAME' : `${v}:1`),
+    );
+    const matteRow = row('MATTE');
+    matteRow.root.appendChild(matte.root);
+    console_.appendChild(matteRow.root);
+
     const sceneRow = row('ROOM');
     this.sceneChips = chips(
       SCENES.map((s) => s.id),
@@ -438,8 +488,13 @@ export class Panel {
   private strobeBash: HTMLButtonElement;
   private blinderBash: HTMLButtonElement;
   private adaptiveToggle: ToggleControl;
+  private filmToggle: ToggleControl;
+  private bokehSlider: SliderControl;
+  private shutterSlider: SliderControl;
   private tripFill: HTMLElement;
   private tripBiasSlider: SliderControl;
+  private loopbackHelp: HTMLElement;
+  private fileDrop: HTMLElement;
 
   /** Palette swatches follow the current genre, plus AUTO and white. */
   private buildSwatches(): void {
@@ -482,12 +537,18 @@ export class Panel {
     this.flashToggle.set(api.reduceFlashing());
     this.adaptiveToggle.set(api.adaptiveQuality());
     this.tripBiasSlider.set(api.tripBias());
+    this.filmToggle.set(api.cinematic());
+    this.bokehSlider.set(api.bokeh());
+    this.shutterSlider.set(api.shutter());
     this.syncPlayButton();
     this.buildSwatches();
 
-    const isSynth = api.sourceMode() === 'synth';
+    const mode = api.sourceMode();
+    const isSynth = mode === 'synth';
     this.inputSection.style.display = isSynth ? 'none' : '';
     this.inputLabelEl.textContent = isSynth ? '' : `input: ${api.inputLabel()}`;
+    this.loopbackHelp.style.display = mode === 'spotify' ? '' : 'none';
+    this.fileDrop.style.display = mode === 'file' ? '' : 'none';
   }
 
   private syncPlayButton(): void {

@@ -20,6 +20,11 @@ uniform float uVignette;
 uniform float uReduceFlashing;
 /** 0 normal, 1 source only, 2 bloom only. */
 uniform int uDebug;
+/** Warm bleed around highlights, the way film emulsion scatters red. */
+uniform float uHalation;
+/** Target aspect for the matte bars. 0 disables. */
+uniform float uLetterbox;
+uniform float uAspect;
 
 out vec4 fragColor;
 
@@ -71,6 +76,14 @@ void main() {
   vec3 bloom = texture(uBloom, uv).rgb;
 
   vec3 col = src + bloom * uBloomAmount;
+
+  // Halation: on film the red layer scatters furthest, so bright sources bleed
+  // a warm halo. Tinting the existing bloom is enough to read as emulsion and
+  // costs nothing extra.
+  if (uHalation > 0.0) {
+    float b = dot(bloom, vec3(0.2126, 0.7152, 0.0722));
+    col += bloom * vec3(1.0, 0.42, 0.22) * uHalation * smoothstep(0.1, 1.2, b);
+  }
   if (uDebug == 1) col = src;
   else if (uDebug == 2) col = bloom;
   col *= uExposure;
@@ -97,6 +110,18 @@ void main() {
   // Reduce-flashing mode: lift the floor and compress the top so hard cuts
   // between black and full white become a much smaller swing.
   col = mix(col, col * 0.72 + 0.055, uReduceFlashing);
+
+  // Anamorphic matte. Cropping to a cinema ratio does more for "this was shot"
+  // than any amount of grain, because the frame shape is the first thing the
+  // eye reads as film rather than as a game viewport.
+  if (uLetterbox > 0.0) {
+    float visible = uAspect / uLetterbox;
+    float bar = (1.0 - clamp(visible, 0.0, 1.0)) * 0.5;
+    if (vUv.y < bar || vUv.y > 1.0 - bar) {
+      fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+      return;
+    }
+  }
 
   fragColor = vec4(linearToSrgb(max(col, 0.0)), 1.0);
 }

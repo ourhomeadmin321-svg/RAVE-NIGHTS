@@ -34,6 +34,7 @@ import compositeFrag from './shaders/composite.frag?raw';
 import fractalFrag from './shaders/fractal.frag?raw';
 import tripFrag from './shaders/trip.frag?raw';
 import blitFrag from './shaders/blit.frag?raw';
+import cinemaFrag from './shaders/cinema.frag?raw';
 
 const CHUNKS: Record<string, string> = { common: commonGlsl, fixtures: fixturesGlsl };
 
@@ -57,13 +58,15 @@ interface QualitySettings {
   bloomLevels: number;
   /** Raymarch steps for the KIFS background. */
   fractalSteps: number;
+  /** Bokeh/motion-blur taps in the lens pass. */
+  lensTaps: number;
 }
 
 const QUALITY_SETTINGS: Record<Quality, QualitySettings> = {
-  low: { renderScale: 0.6, volScale: 0.35, steps: 18, bloomLevels: 3, fractalSteps: 26 },
-  medium: { renderScale: 0.85, volScale: 0.5, steps: 30, bloomLevels: 4, fractalSteps: 44 },
-  high: { renderScale: 1, volScale: 0.55, steps: 44, bloomLevels: 5, fractalSteps: 64 },
-  ultra: { renderScale: 1, volScale: 0.8, steps: 72, bloomLevels: 5, fractalSteps: 96 },
+  low: { renderScale: 0.6, volScale: 0.35, steps: 18, bloomLevels: 3, fractalSteps: 26, lensTaps: 8 },
+  medium: { renderScale: 0.85, volScale: 0.5, steps: 30, bloomLevels: 4, fractalSteps: 44, lensTaps: 16 },
+  high: { renderScale: 1, volScale: 0.55, steps: 44, bloomLevels: 5, fractalSteps: 64, lensTaps: 28 },
+  ultra: { renderScale: 1, volScale: 0.8, steps: 72, bloomLevels: 5, fractalSteps: 96, lensTaps: 46 },
 };
 
 export interface FrameState {
@@ -90,10 +93,11 @@ export interface FrameState {
  *   3. laser quads, depth-tested so beams stop at walls but do not write depth
  *   4. volumetric raymarch at reduced resolution, reading scene depth to know
  *      where to stop
- *   5. trip pass — combines scene and volumetric, then warps, mirrors and
- *      feeds the result back into itself
- *   6. bloom chain off the tripped image
- *   7. composite, glitch, tonemap, grade
+ *   5. lens pass — combines scene and volumetric, then applies depth of field
+ *      and camera motion blur, both of which need the scene's own depth
+ *   6. trip pass — warps, mirrors and feeds the result back into itself
+ *   7. bloom chain off the tripped image
+ *   8. composite, glitch, halation, matte, tonemap, grade
  *
  * A KIFS fractal is drawn behind everything at step 0 when the trip level is
  * high enough for the walls to have started eroding.
@@ -130,6 +134,20 @@ export class Renderer {
   /** 0 normal, 1 source only, 2 bloom only. Isolates a pass for tuning. */
   debugView = 0;
 
+  /** Film look. Bokeh radius in pixels at maximum circle of confusion. */
+  bokeh = 6;
+  /** Camera motion blur strength. 0 is a locked shutter. */
+  shutter = 0.4;
+  /** Warm highlight bleed. */
+  halation = 0.35;
+  /** Matte aspect, e.g. 2.39 for anamorphic scope. 0 fills the frame. */
+  letterbox = 2.39;
+  /** Master switch for the whole film treatment. */
+  cinematic = true;
+
+  /** Last frame's view-projection, for velocity reprojection. */
+  private prevViewProj: Float32Array | null = null;
+
   private hdrSupported: boolean;
 
   private sceneProgram: WebGLProgram;
@@ -142,6 +160,7 @@ export class Renderer {
   private fractalProgram: WebGLProgram;
   private tripProgram: WebGLProgram;
   private blitProgram: WebGLProgram;
+  private cinemaProgram: WebGLProgram;
 
   private sceneU: UniformCache;
   private crowdU: UniformCache;
@@ -153,6 +172,7 @@ export class Renderer {
   private fractalU: UniformCache;
   private tripU: UniformCache;
   private blitU: UniformCache;
+  private cinemaU: UniformCache;
 
   private fsTriangle: WebGLVertexArrayObject;
 
@@ -172,6 +192,7 @@ export class Renderer {
   private sceneFbo: Framebuffer | null = null;
   private volFbo: Framebuffer | null = null;
   private fractalFbo: Framebuffer | null = null;
+  private cinemaFbo: Framebuffer | null = null;
   /**
    * Ping-pong pair for frame feedback: one holds the previous frame while the
    * other is written. A single target cannot work — sampling a texture that is
@@ -225,6 +246,7 @@ export class Renderer {
     this.fractalProgram = build(fullscreenVert, fractalFrag, 'fractal');
     this.tripProgram = build(fullscreenVert, tripFrag, 'trip');
     this.blitProgram = build(fullscreenVert, blitFrag, 'blit');
+    this.cinemaProgram = build(fullscreenVert, cinemaFrag, 'cinema');
 
     this.sceneU = new UniformCache(gl, this.sceneProgram);
     this.crowdU = new UniformCache(gl, this.crowdProgram);
@@ -236,6 +258,7 @@ export class Renderer {
     this.fractalU = new UniformCache(gl, this.fractalProgram);
     this.tripU = new UniformCache(gl, this.tripProgram);
     this.blitU = new UniformCache(gl, this.blitProgram);
+    this.cinemaU = new UniformCache(gl, this.cinemaProgram);
 
     this.fsTriangle = createFullscreenTriangle(gl);
 
@@ -403,6 +426,7 @@ export class Renderer {
     if (this.sceneFbo) deleteFramebuffer(gl, this.sceneFbo);
     if (this.volFbo) deleteFramebuffer(gl, this.volFbo);
     if (this.fractalFbo) deleteFramebuffer(gl, this.fractalFbo);
+    if (this.cinemaFbo) deleteFramebuffer(gl, this.cinemaFbo);
     if (this.tripFbo) for (const fb of this.tripFbo) deleteFramebuffer(gl, fb);
     for (const fb of this.bloomChain) deleteFramebuffer(gl, fb);
     this.bloomChain = [];
@@ -412,6 +436,7 @@ export class Renderer {
     // The fractal is soft and detailed; half resolution is indistinguishable
     // once it is behind haze and bloom, and it halves the marching cost.
     this.fractalFbo = createFramebuffer(gl, this.width * q.volScale, this.height * q.volScale, hdr);
+    this.cinemaFbo = createFramebuffer(gl, this.width, this.height, hdr);
     this.tripFbo = [
       createFramebuffer(gl, this.width, this.height, hdr),
       createFramebuffer(gl, this.width, this.height, hdr),
@@ -585,11 +610,38 @@ export class Renderer {
     gl.bindVertexArray(this.fsTriangle);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // ---- 5. trip pass: warp, mirror, feed back
+    // ---- 5. lens: combine scene and volumetric, then defocus and blur
     //
-    // This is also where scene and volumetric are combined, so the warp and the
-    // kaleidoscope fold act on the finished image rather than on one layer of
-    // it — mirroring the beams but not the room would come apart instantly.
+    // Before the trip pass, deliberately. Defocus is something the *camera*
+    // does to the room; applying it after the kaleidoscope would blur the
+    // mirrored copies instead, which no lens does.
+    const cinemaFbo = this.cinemaFbo!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, cinemaFbo.fbo);
+    gl.viewport(0, 0, cinemaFbo.width, cinemaFbo.height);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.cinemaProgram);
+    bindTexture(gl, 0, sceneFbo.color);
+    gl.uniform1i(this.cinemaU.loc('uScene'), 0);
+    bindTexture(gl, 1, volFbo.color);
+    gl.uniform1i(this.cinemaU.loc('uVolumetric'), 1);
+    bindTexture(gl, 2, sceneFbo.depth);
+    gl.uniform1i(this.cinemaU.loc('uDepth'), 2);
+    gl.uniformMatrix4fv(this.cinemaU.loc('uInvViewProj'), false, invViewProj);
+    gl.uniformMatrix4fv(this.cinemaU.loc('uPrevViewProj'), false, this.prevViewProj ?? viewProj);
+    gl.uniform3fv(this.cinemaU.loc('uEye'), eye);
+    gl.uniform2f(this.cinemaU.loc('uTexel'), 1 / cinemaFbo.width, 1 / cinemaFbo.height);
+    gl.uniform1f(this.cinemaU.loc('uNear'), 0.1);
+    gl.uniform1f(this.cinemaU.loc('uFar'), 160);
+    gl.uniform1f(this.cinemaU.loc('uFocus'), this.camera.focusDistance());
+    gl.uniform1f(this.cinemaU.loc('uBokeh'), this.cinematic ? this.bokeh : 0);
+    gl.uniform1f(this.cinemaU.loc('uShutter'), this.cinematic ? this.shutter : 0);
+    gl.uniform1i(this.cinemaU.loc('uTaps'), this.cinematic ? q.lensTaps : 1);
+    gl.bindVertexArray(this.fsTriangle);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    this.prevViewProj = viewProj;
+
+    // ---- 6. trip pass: warp, mirror, feed back
     const tripPair = this.tripFbo!;
     const dst = tripPair[this.tripIndex];
     const prev = tripPair[1 - this.tripIndex];
@@ -600,12 +652,10 @@ export class Renderer {
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
     gl.useProgram(this.tripProgram);
-    bindTexture(gl, 0, sceneFbo.color);
-    gl.uniform1i(this.tripU.loc('uScene'), 0);
-    bindTexture(gl, 1, volFbo.color);
-    gl.uniform1i(this.tripU.loc('uVolumetric'), 1);
-    bindTexture(gl, 2, prev.color);
-    gl.uniform1i(this.tripU.loc('uFeedback'), 2);
+    bindTexture(gl, 0, cinemaFbo.color);
+    gl.uniform1i(this.tripU.loc('uSource'), 0);
+    bindTexture(gl, 1, prev.color);
+    gl.uniform1i(this.tripU.loc('uFeedback'), 1);
     gl.uniform1f(this.tripU.loc('uTime'), state.time);
     gl.uniform1f(this.tripU.loc('uAspect'), aspect);
     gl.uniform1f(this.tripU.loc('uWarp'), trip.warp);
@@ -617,10 +667,10 @@ export class Renderer {
     gl.bindVertexArray(this.fsTriangle);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // ---- 6. bloom, off the tripped image so trails and folds glow too
+    // ---- 7. bloom, off the tripped image so trails and folds glow too
     this.renderBloom(dst);
 
-    // ---- 7. composite to the screen
+    // ---- 8. composite to the screen
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.useProgram(this.compositeProgram);
@@ -636,6 +686,9 @@ export class Renderer {
     gl.uniform1f(this.compositeU.loc('uGrain'), 0.035);
     gl.uniform1f(this.compositeU.loc('uVignette'), 0.75);
     gl.uniform1f(this.compositeU.loc('uReduceFlashing'), state.reduceFlashing ? 1 : 0);
+    gl.uniform1f(this.compositeU.loc('uHalation'), this.cinematic ? this.halation : 0);
+    gl.uniform1f(this.compositeU.loc('uLetterbox'), this.cinematic ? this.letterbox : 0);
+    gl.uniform1f(this.compositeU.loc('uAspect'), aspect);
     gl.uniform1i(this.compositeU.loc('uDebug'), this.debugView);
     gl.bindVertexArray(this.fsTriangle);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

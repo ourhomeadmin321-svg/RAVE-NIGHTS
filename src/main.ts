@@ -208,11 +208,17 @@ class App implements KeyApi {
     }
 
     this.synth.stop();
-    if (mode === 'mic') {
-      this.input.useMicrophone().then(
-        () => this.toast('listening — the rig will lock to the beat in a few bars'),
+    if (mode === 'mic' || mode === 'spotify') {
+      const capture = mode === 'spotify' ? this.input.useSystemAudio() : this.input.useMicrophone();
+      capture.then(
+        () =>
+          this.toast(
+            mode === 'spotify'
+              ? 'capturing — press play in Spotify, the rig locks on in a few bars'
+              : 'listening — the rig will lock to the beat in a few bars',
+          ),
         (err: unknown) => {
-          this.toast('microphone unavailable here — back to the synth engine');
+          this.toast('audio capture unavailable here — back to the synth engine');
           console.warn(err);
           this.mode = 'synth';
           void this.synth.start();
@@ -397,6 +403,37 @@ class App implements KeyApi {
 
   palette(): RGB[] {
     return GENRES[this.source.genre()].lighting.palette;
+  }
+
+  cinematic(): boolean {
+    return this.renderer.cinematic;
+  }
+
+  setCinematic(v: boolean): void {
+    this.renderer.cinematic = v;
+    // A locked-off camera suits a clean render; handheld drift only makes
+    // sense once the frame is pretending to have been photographed.
+    this.renderer.camera.handheld = v ? 0.7 : 0;
+  }
+
+  bokeh(): number {
+    return this.renderer.bokeh;
+  }
+
+  setBokeh(v: number): void {
+    this.renderer.bokeh = v;
+  }
+
+  shutter(): number {
+    return this.renderer.shutter;
+  }
+
+  setShutter(v: number): void {
+    this.renderer.shutter = v;
+  }
+
+  setLetterbox(v: number): void {
+    this.renderer.letterbox = v;
   }
 
   toast(message: string): void {

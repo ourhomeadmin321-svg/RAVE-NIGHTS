@@ -36,6 +36,11 @@ export class Camera {
   private shake = 0;
   private shakeSeed = Math.random() * 100;
 
+  /** Operator handheld drift. 0 is locked-off tripod, 1 is shoulder-mounted. */
+  handheld = 0.7;
+  /** Smoothed subject distance, in metres — what the lens focuses on. */
+  private focus = 12;
+
   private dragging = false;
   private lastPointer: [number, number] = [0, 0];
 
@@ -203,23 +208,70 @@ export class Camera {
     this.pos = approach3(this.pos, wantPos, rate, dt);
     this.target = approach3(this.target, wantTarget, rate, dt);
     this.fov = approach(this.fov, wantFov, 3, dt);
+    this.updateFocus(dt, this.pos);
   }
 
-  /** Camera position with the kick shake applied. */
+  /**
+   * Camera position with kick shake and handheld drift applied.
+   *
+   * The drift is three sine layers at incommensurate rates rather than noise,
+   * because a human operator's sway has slow structure to it — a single fast
+   * jitter reads as a broken mount, and true random reads as an earthquake.
+   * The rates are deliberately not multiples of each other so the pattern never
+   * visibly repeats.
+   */
   shakenPos(time: number): Vec3 {
-    if (this.shake <= 0.001) return this.pos;
-    const a = this.shake * 0.06;
     const s = this.shakeSeed;
-    return [
-      this.pos[0] + Math.sin(time * 47 + s) * a,
-      this.pos[1] + Math.sin(time * 61 + s * 1.7) * a,
-      this.pos[2] + Math.sin(time * 53 + s * 2.3) * a * 0.5,
-    ];
+    let x = this.pos[0];
+    let y = this.pos[1];
+    let z = this.pos[2];
+
+    if (this.handheld > 0.001) {
+      const h = this.handheld;
+      // Slow sway, mid-rate breathing, fine tremor.
+      x += (Math.sin(time * 0.37 + s) * 0.05 + Math.sin(time * 1.31 + s * 2.1) * 0.014) * h;
+      y += (Math.sin(time * 0.29 + s * 1.7) * 0.04 + Math.sin(time * 1.73 + s) * 0.011) * h;
+      z += Math.sin(time * 0.23 + s * 0.9) * 0.035 * h;
+    }
+
+    if (this.shake > 0.001) {
+      const a = this.shake * 0.06;
+      x += Math.sin(time * 47 + s) * a;
+      y += Math.sin(time * 61 + s * 1.7) * a;
+      z += Math.sin(time * 53 + s * 2.3) * a * 0.5;
+    }
+
+    return [x, y, z];
+  }
+
+  /**
+   * Distance the lens should focus at.
+   *
+   * Taken from the camera's own subject rather than from a depth readback: the
+   * look-at target *is* what the shot is about, so focusing on it is both free
+   * and correct. Easing it produces real focus pulls whenever the camera cuts
+   * or moves, which is most of what sells a shot as photographed.
+   */
+  focusDistance(): number {
+    return this.focus;
+  }
+
+  private updateFocus(dt: number, eye: Vec3): void {
+    const dx = this.target[0] - eye[0];
+    const dy = this.target[1] - eye[1];
+    const dz = this.target[2] - eye[2];
+    const want = Math.max(1.5, Math.hypot(dx, dy, dz));
+    // Slower than the camera move, so focus visibly lags a cut and catches up.
+    this.focus = approach(this.focus, want, 2.2, dt);
   }
 
   viewProj(aspect: number, time: number): { view: Mat4; proj: Mat4; viewProj: Mat4; eye: Vec3 } {
     const eye = this.shakenPos(time);
-    const view = lookAt(eye, this.target, [0, 1, 0]);
+    // A hand-held camera is never quite level; a slow roll on the up vector is
+    // the cheapest way to say "a person is holding this".
+    const roll = this.handheld * (Math.sin(time * 0.19 + this.shakeSeed) * 0.022 + this.shake * 0.03);
+    const up: Vec3 = [Math.sin(roll), Math.cos(roll), 0];
+    const view = lookAt(eye, this.target, up);
     const proj = perspective(this.fov, aspect, 0.1, 160);
     return { view, proj, viewProj: multiply(proj, view), eye };
   }

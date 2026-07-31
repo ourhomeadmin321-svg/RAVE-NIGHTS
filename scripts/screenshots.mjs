@@ -133,6 +133,24 @@ async function main() {
       app.forceSection('breakdown');
     })()`);
 
+    // Every shot above forces a drop, so they are all at maximum trip. Capture
+    // the sober end too — that is where the lens work is actually visible.
+    await shot('cinematic-clean', `(() => {
+      const app = window.raveNights;
+      app.setScene('mainstage');
+      app.setGenre('house');
+      app.setTripBias(-1);
+      app.forceSection('drop');
+    })()`);
+    await shot('cinematic-mid', `(() => {
+      const app = window.raveNights;
+      app.setScene('clubroom');
+      app.setGenre('techno');
+      app.setTripBias(-0.55);
+      app.forceSection('drop');
+    })()`);
+    await page.evaluate(`window.raveNights.setTripBias(0)`);
+
     // The single-file build is what actually ships, so boot it too. Everything
     // above only ever exercised the multi-asset version.
     await page.goto(SINGLE_URL, { waitUntil: 'networkidle' });

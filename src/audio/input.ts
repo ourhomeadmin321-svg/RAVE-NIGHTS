@@ -80,10 +80,31 @@ export class InputSource implements MusicSource {
   }
 
   /**
+   * Capture Spotify (or anything else the machine is playing) through a
+   * loopback device.
+   *
+   * There is no API route for this. Spotify's Web Playback SDK renders through
+   * a DRM-protected pipeline that cannot be connected to an AnalyserNode, and
+   * the Web API endpoints that used to expose beats, bars and sections without
+   * touching the audio — /audio-analysis and /audio-features — were deprecated
+   * in November 2024 and return 403 for any app without pre-existing extended
+   * quota. Capturing the output is the only path that still works, and it is
+   * what VJ software does for exactly the same reason.
+   *
+   * Mechanically this is `getUserMedia` with every "helpful" processing stage
+   * switched off. Echo cancellation and noise suppression are tuned for speech
+   * and will gut a kick drum; auto gain will fight the track's own dynamics and
+   * flatten the build-ups the beat tracker relies on.
+   */
+  async useSystemAudio(): Promise<void> {
+    return this.useMicrophone('system audio');
+  }
+
+  /**
    * Capture the microphone. Deliberately *not* routed to the speakers — doing
    * so in a room with the music playing is a feedback loop.
    */
-  async useMicrophone(): Promise<void> {
+  async useMicrophone(label = 'microphone'): Promise<void> {
     // In a sandboxed iframe or on an insecure origin the whole API is absent
     // rather than merely denied, so this has to be a presence check and not a
     // rejection handler.
@@ -102,7 +123,7 @@ export class InputSource implements MusicSource {
 
     this.stream = stream;
     this.source = node;
-    this._label = 'microphone';
+    this._label = label;
     this.resetTracking();
     bus.emit('audio:started', {});
   }
