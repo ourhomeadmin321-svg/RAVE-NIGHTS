@@ -84,6 +84,12 @@ export class InputSource implements MusicSource {
    * so in a room with the music playing is a feedback loop.
    */
   async useMicrophone(): Promise<void> {
+    // In a sandboxed iframe or on an insecure origin the whole API is absent
+    // rather than merely denied, so this has to be a presence check and not a
+    // rejection handler.
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('microphone capture is unavailable in this context');
+    }
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     });

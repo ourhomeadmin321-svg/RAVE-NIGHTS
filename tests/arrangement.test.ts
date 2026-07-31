@@ -88,6 +88,27 @@ describe('Arrangement', () => {
     expect(s.barsIn).toBe(0);
   });
 
+  it('lands a jump forced before the first bar on bar 1', () => {
+    // How the app opens: the synth forces a drop at start-up so the first one
+    // arrives seconds in rather than 83 seconds in. Bar 0 stays the intro and
+    // the jump takes effect on the very next bar line.
+    const a = new Arrangement();
+    a.force('drop');
+    expect(a.update(0).section).toBe('intro');
+    const s = a.update(1);
+    expect(s.section).toBe('drop');
+    expect(s.barsIn).toBe(0);
+  });
+
+  it('runs the normal cycle after an opening jump', () => {
+    const a = new Arrangement();
+    a.force('drop');
+    for (let bar = 0; bar <= 1; bar++) a.update(bar);
+    // The drop is 16 bars in the default cycle, then a breakdown follows.
+    expect(a.update(16).section).toBe('drop');
+    expect(a.update(17).section).toBe('breakdown');
+  });
+
   it('rejects an empty cycle', () => {
     expect(() => new Arrangement([])).toThrow();
   });

@@ -13,7 +13,10 @@ import { mkdir, rm } from 'node:fs/promises';
 import { chromium } from '@playwright/test';
 
 const PORT = Number(process.env.PORT ?? 4173);
-const URL = `http://localhost:${PORT}/`;
+const URL = `http://localhost:${PORT}/?capture`;
+// The inlined single-file build — verified separately, because inlining
+// rewrites the shipped page and a broken inline script still "builds" fine.
+const SINGLE_URL = `http://localhost:${PORT}/rave-nights.html?capture`;
 const OUT = 'shots';
 
 const SCENES = ['mainstage', 'cathedral', 'clubroom'];
@@ -129,6 +132,23 @@ async function main() {
       app.setGenre('techno');
       app.forceSection('breakdown');
     })()`);
+
+    // The single-file build is what actually ships, so boot it too. Everything
+    // above only ever exercised the multi-asset version.
+    await page.goto(SINGLE_URL, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: 'ENTER THE ROOM' }).click();
+    const singleFailure = await page.locator('.gate .fail').textContent().catch(() => null);
+    if (singleFailure) throw new Error(`single-file build failed to start: ${singleFailure}`);
+    await page.waitForFunction(() => 'raveNights' in window, null, { timeout: 15_000 });
+    await page.evaluate(() => {
+      const app = window.raveNights;
+      app.setAdaptiveQuality(false);
+      app.setQuality('low');
+      app.setCameraMode('crowd');
+    });
+    await page.waitForTimeout(4500);
+    await page.screenshot({ path: `${OUT}/single-file-build.png` });
+    console.log('captured single-file-build (inlined page booted cleanly)');
 
     await browser.close();
 

@@ -205,7 +205,7 @@ class App implements KeyApi {
       this.input.useMicrophone().then(
         () => this.toast('listening — the rig will lock to the beat in a few bars'),
         (err: unknown) => {
-          this.toast('microphone denied — falling back to the synth engine');
+          this.toast('microphone unavailable here — back to the synth engine');
           console.warn(err);
           this.mode = 'synth';
           void this.synth.start();

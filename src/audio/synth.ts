@@ -92,6 +92,14 @@ export class SynthSource implements MusicSource {
     await this.engine.resume();
     this.clock.reset(this.engine.currentTime + 0.08);
     this.arrangement.reset(0);
+    // Start in the drop rather than at the top of the cycle. Trance's opening
+    // is intro 16 + build 32 bars, which at 138 BPM puts the first drop 83
+    // seconds after you press play — long enough that the app looks broken to
+    // anyone who just opened it. `force` lands on the next bar line, so bar 0
+    // is a brief intro and the room opens up at bar 1; the normal cycle carries
+    // on from there. Musically this is just walking into a club mid-set, which
+    // is how anyone actually arrives at one.
+    this.arrangement.force('drop');
     this.history.clear();
     this.nextStep = 0;
     this.pendingVisuals = [];

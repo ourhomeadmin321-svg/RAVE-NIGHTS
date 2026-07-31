@@ -172,7 +172,9 @@ export class Renderer {
       antialias: false,
       depth: true,
       powerPreference: 'high-performance',
-      preserveDrawingBuffer: true,
+      // Only the screenshot runner needs the buffer to survive compositing, and
+      // asking for it costs real fill-rate on some drivers. Opt in with ?capture.
+      preserveDrawingBuffer: new URLSearchParams(location.search).has('capture'),
     });
     if (!gl) throw new Error('WebGL2 is not available in this browser.');
     this.gl = gl;

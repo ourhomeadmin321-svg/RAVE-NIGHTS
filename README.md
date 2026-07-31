@@ -7,10 +7,17 @@ desk.
 
 No dependencies at runtime. Everything is hand-written against the Web Audio API and WebGL2.
 
+**▶ [Open the rave](https://claude.ai/code/artifact/a5fdbd7f-dbec-4fc4-9341-4c85621424ac)** — turn the sound
+up, press ENTER THE ROOM.
+
 ```bash
 npm install
-npm run dev          # http://localhost:5173
+npm run dev            # http://localhost:5173
+npm run build:single   # dist/rave-nights.html — one self-contained file
 ```
+
+`build:single` inlines everything into a single 126KB HTML file with no external requests at all.
+Open it straight off disk, host it anywhere, or send it to someone.
 
 > **⚠ Photosensitivity warning.** This application contains sustained strobe lighting, rapid
 > flashing and high-contrast flicker, which may trigger seizures in people with photosensitive
@@ -39,6 +46,11 @@ scale and progression, a swing amount, and an arrangement shape:
 Everything is phrase-aligned on 8/16/32 bars and moves through **intro → build → drop → breakdown
 → build → drop → outro**, the way dance music is actually written. Builds open the master filter,
 double the snare-roll subdivision, and drop the kick out for the final bar.
+
+It opens *in* the drop rather than at the top of that cycle. Trance's own opening is 48 bars, which
+at 138 BPM would put the first drop 83 seconds after you press play — long enough that the page
+looks broken. Starting mid-set is also just what walking into a club is like. Everything after the
+first bar runs the normal cycle.
 
 ### The lighting is operated, not reacted
 
@@ -160,15 +172,19 @@ scripts/      screenshot runner
 ## Verifying
 
 ```bash
-npm test          # 168 unit tests
+npm test               # 170 unit tests
 npm run typecheck
-npm run build
-npm run shots     # drives the built app in Chromium, captures every room and genre
+npm run build:single
+npm run shots          # drives the built app in Chromium, captures every room and genre
 ```
 
 `npm run shots` is the only check that proves the shaders compile and the rig renders — the unit
 tests cover the logic but never touch WebGL. It writes to `shots/` and exits non-zero on any
-console error.
+console error. Its last step loads `dist/rave-nights.html` specifically, because inlining rewrites
+the page that actually ships and a broken inline script would still "build" successfully.
+
+`scripts/inline.mjs` fails the build if the inlined page still references `dist/assets` or any
+external host, so a single-file build that quietly needs the network cannot get out the door.
 
 For tuning the look, `renderer.debugView` (`0` normal, `1` scene, `2` volumetric, `3` bloom)
 isolates a single pass, and `renderer.scatter` / `hazeScale` / `fixtureGain` / `laserGain` /
