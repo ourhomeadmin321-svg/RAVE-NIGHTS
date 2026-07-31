@@ -89,3 +89,61 @@ vec3 acesTonemap(vec3 x) {
 vec3 linearToSrgb(vec3 c) {
   return mix(c * 12.92, 1.055 * pow(max(c, 1e-5), vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
 }
+
+// ---------------------------------------------------------------- psychedelia
+
+mat2 rot2(float a) {
+  float c = cos(a);
+  float s = sin(a);
+  return mat2(c, -s, s, c);
+}
+
+/**
+ * Cosine gradient palette (Inigo Quilez). Four vec3 controls give a smooth
+ * cyclic ramp, which is what keeps fractal orbit-trap colouring from banding
+ * the way an indexed lookup table does.
+ */
+vec3 cosPalette(float t, vec3 a, vec3 b, vec3 c, vec3 d) {
+  return a + b * cos(6.28318 * (c * t + d));
+}
+
+/** The default psychedelic ramp: saturated, cyclic, never reaching black. */
+vec3 tripPalette(float t) {
+  return cosPalette(t,
+    vec3(0.55, 0.45, 0.55),
+    vec3(0.45, 0.48, 0.45),
+    vec3(1.0, 1.0, 1.0),
+    vec3(0.0, 0.33, 0.67));
+}
+
+/**
+ * Fold a point radially into `segments` mirrored wedges.
+ *
+ * `p` is centred and aspect-corrected by the caller. Mirroring alternate wedges
+ * rather than just repeating them is what makes the seams line up — a plain
+ * modulo leaves a visible discontinuity all the way round.
+ */
+vec2 kaleidoscope(vec2 p, float segments) {
+  float a = atan(p.y, p.x);
+  float r = length(p);
+  float seg = 6.28318 / max(segments, 1.0);
+  a = mod(a, seg);
+  a = abs(a - seg * 0.5);
+  return vec2(cos(a), sin(a)) * r;
+}
+
+/**
+ * Domain warping: offset the sample point by noise, then offset *that* by more
+ * noise. Two levels is what turns smooth noise into something that looks like
+ * it is flowing, rather than a static cloud sliding past.
+ */
+vec2 domainWarp(vec2 p, float t, float amount) {
+  if (amount <= 0.0) return p;
+  vec3 q = vec3(p * 2.2, t * 0.18);
+  float a = valueNoise(q);
+  float b = valueNoise(q + vec3(5.2, 1.3, 0.4));
+  vec3 r = vec3(p * 2.6 + vec2(a, b) * 1.6, t * 0.14 + 3.1);
+  float c = valueNoise(r);
+  float d = valueNoise(r + vec3(1.7, 9.2, 2.8));
+  return p + (vec2(c, d) - 0.5) * amount;
+}

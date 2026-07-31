@@ -61,6 +61,9 @@ export interface PanelApi {
   setAdaptiveQuality(v: boolean): void;
   reduceFlashing(): boolean;
   setReduceFlashing(v: boolean): void;
+  tripLevel(): number;
+  tripBias(): number;
+  setTripBias(v: number): void;
 
   palette(): RGB[];
   toast(message: string): void;
@@ -79,6 +82,8 @@ export interface ReadoutInfo {
   quality: string;
   shot: string;
   confident: boolean;
+  /** 0..1 — how far gone the visuals are. */
+  trip: number;
 }
 
 const rgbCss = (c: RGB): string =>
@@ -274,6 +279,25 @@ export class Panel {
     }, true);
     console_.appendChild(this.manualToggle.root);
 
+    const tripRow = row('TRIP');
+    const tripMeter = el('div', 'meter');
+    const tripFill = el('div', 'meter-fill');
+    tripMeter.appendChild(tripFill);
+    this.tripFill = tripFill;
+    tripRow.root.appendChild(tripMeter);
+    const tripBias = slider(
+      'TRIP BIAS',
+      -1,
+      1,
+      0.01,
+      0,
+      (v) => api.setTripBias(v),
+      (v) => (Math.abs(v) < 0.005 ? 'FOLLOW MUSIC' : v > 0 ? `+${v.toFixed(2)}` : v.toFixed(2)),
+    );
+    tripRow.root.appendChild(tripBias.root);
+    this.tripBiasSlider = tripBias;
+    console_.appendChild(tripRow.root);
+
     const bashes = el('div', 'group');
     bashes.style.marginTop = '8px';
     const strobe = bashButton('STROBE', (held) => {
@@ -397,7 +421,8 @@ export class Panel {
         'div',
         'note',
         'SPACE strobe · B blinder · 1-6 laser cues · D drop · X breakdown · ' +
-          'Q/W/E rooms · C camera cut · H haze burst · ↑/↓ energy · F fullscreen · TAB hide UI',
+          'Q/W/E rooms · C camera cut · H haze burst · ↑/↓ energy · ←/→ trip · ' +
+          'F fullscreen · TAB hide UI',
       ),
     );
 
@@ -413,6 +438,8 @@ export class Panel {
   private strobeBash: HTMLButtonElement;
   private blinderBash: HTMLButtonElement;
   private adaptiveToggle: ToggleControl;
+  private tripFill: HTMLElement;
+  private tripBiasSlider: SliderControl;
 
   /** Palette swatches follow the current genre, plus AUTO and white. */
   private buildSwatches(): void {
@@ -454,6 +481,7 @@ export class Panel {
     this.manualToggle.set(api.manual().enabled);
     this.flashToggle.set(api.reduceFlashing());
     this.adaptiveToggle.set(api.adaptiveQuality());
+    this.tripBiasSlider.set(api.tripBias());
     this.syncPlayButton();
     this.buildSwatches();
 
@@ -510,7 +538,10 @@ export class Panel {
       `${info.section.toUpperCase()} · ${info.armed ? 'DROP ARMED' : next}`,
     );
     add('item', `CUE <b>${info.cue}</b>`);
+    add('item', `TRIP <b>${Math.round(info.trip * 100)}</b>%`);
     add('item', `${info.shot.toUpperCase()} · ${info.quality.toUpperCase()} · <b>${info.frameMs.toFixed(1)}</b>ms`);
+    // The meter is the live one; the readout number is for reference.
+    this.tripFill.style.width = `${(info.trip * 100).toFixed(1)}%`;
     if (!info.confident) add('item', 'BEAT GRID UNCERTAIN — TAP / ALIGN');
   }
 }

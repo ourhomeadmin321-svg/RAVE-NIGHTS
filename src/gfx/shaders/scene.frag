@@ -20,6 +20,8 @@ uniform int uWallMode;    // 0 off, 1 spectrum, 2 pulse, 3 tunnel, 4 strobe, 5 l
 uniform sampler2D uBarTex;
 uniform float uBarCount;
 uniform float uEnergy;
+/** 0..1 — how far the room has eroded into the fractal space behind it. */
+uniform float uDissolve;
 
 out vec4 fragColor;
 
@@ -86,6 +88,19 @@ vec3 wallContent(vec2 uv) {
 void main() {
   vec3 N = normalize(vNormal);
   vec3 V = normalize(uEye - vWorld);
+
+  // Erode the shell of the room so the fractal already drawn behind it shows
+  // through. Discarding against a drifting noise field rather than fading the
+  // whole surface keeps solid fragments right up until they vanish, so the wall
+  // reads as crumbling away in pieces instead of turning transparent — and it
+  // costs nothing, because a discarded fragment is simply never shaded.
+  //
+  // Only the shell goes. Floor, truss, booth and every emitter stay, which is
+  // what keeps the rig legible no matter how far gone the room is.
+  if (vMat == MAT_WALL && uDissolve > 0.0) {
+    float n = fbm(vWorld * 0.22 + vec3(0.0, uTime * 0.06, 0.0));
+    if (n < uDissolve * 1.25 - 0.12) discard;
+  }
 
   // Emissive materials skip the lighting loop entirely.
   if (vMat == MAT_LEDWALL) {

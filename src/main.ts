@@ -8,6 +8,8 @@ import { clamp01 } from './core/math';
 import type { GenreId, MusicSource, RGB, Section } from './core/types';
 import type { CameraMode } from './gfx/camera';
 import { Renderer, type Quality } from './gfx/renderer';
+import { Trip } from './gfx/trip';
+import { paletteAt } from './lighting/cues';
 import { Director, defaultManualState, type ManualState } from './lighting/director';
 import { REDUCED_MAX_STROBE_HZ, Rig, SAFE_DEFAULTS } from './lighting/rig';
 import { SCENES, sceneById, type SceneDef } from './scenes';
@@ -34,6 +36,7 @@ class App implements KeyApi {
   readonly renderer: Renderer;
   private scene: SceneDef;
   private manualState: ManualState = defaultManualState();
+  private trip = new Trip();
 
   private panel: Panel;
   private unbindKeys: () => void;
@@ -108,6 +111,7 @@ class App implements KeyApi {
     const t = source.transport();
     const onsets = source.onsets();
     const energy = source.energy();
+    const tripLayers = this.trip.update(dt, source);
 
     this.renderer.camera.update(dt, {
       bar: t.bar,
@@ -125,6 +129,8 @@ class App implements KeyApi {
       energy,
       impact: this.director.impactLevel,
       reduceFlashing: this.reduce,
+      trip: tripLayers,
+      tint: paletteAt(GENRES[source.genre()].lighting.palette, t.bar),
     });
 
     const status = this.director.status();
@@ -141,6 +147,7 @@ class App implements KeyApi {
       quality: this.renderer.quality,
       shot: this.renderer.camera.shotName(),
       confident: t.confident,
+      trip: tripLayers.level,
     });
   };
 
@@ -357,6 +364,25 @@ class App implements KeyApi {
 
   setAdaptiveQuality(v: boolean): void {
     this.renderer.adaptive = v;
+  }
+
+  tripLevel(): number {
+    return this.trip.level;
+  }
+
+  tripBias(): number {
+    return this.trip.bias;
+  }
+
+  /** Offset the music-driven trip level, -1..1. 0 hands it back to the music. */
+  setTripBias(v: number): void {
+    this.trip.bias = Math.max(-1, Math.min(1, v));
+  }
+
+  nudgeTrip(delta: number): void {
+    this.setTripBias(this.trip.bias + delta);
+    const b = this.trip.bias;
+    this.toast(b === 0 ? 'trip follows the music' : `trip bias ${b > 0 ? '+' : ''}${b.toFixed(2)}`);
   }
 
   reduceFlashing(): boolean {

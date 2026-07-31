@@ -395,3 +395,26 @@ select {
     transition: none;
   }
 }
+
+/* Live trip meter — the readout number lags a frame, this does not. */
+.meter {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.meter-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.08s linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .meter-fill {
+    transition: none;
+  }
+}

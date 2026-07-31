@@ -5,50 +5,85 @@ precision highp float;
 
 in vec2 vUv;
 
-uniform sampler2D uScene;
-uniform sampler2D uVolumetric;
+uniform sampler2D uSource;
 uniform sampler2D uBloom;
 uniform float uTime;
 uniform float uExposure;
 uniform float uBloomAmount;
 /** 0..1, spikes on drops. Drives aberration and the punch-in. */
 uniform float uImpact;
+/** 0..1 tearing: block displacement, RGB separation, scanline shear. */
+uniform float uGlitch;
 uniform float uGrain;
 uniform float uVignette;
 /** When on, contrast and flash amplitude are pulled in for safety. */
 uniform float uReduceFlashing;
-/** 0 normal, 1 scene only, 2 volumetric only, 3 bloom only. */
+/** 0 normal, 1 source only, 2 bloom only. */
 uniform int uDebug;
 
 out vec4 fragColor;
 
+/**
+ * Horizontal block tearing.
+ *
+ * Rows are quantised into bands and each band is shoved sideways by a hash of
+ * its index and the current time slice. Quantising *time* as well as space is
+ * what makes it read as digital corruption — a continuously varying offset just
+ * looks like wobble, whereas discrete jumps held for a few frames look like
+ * something broke.
+ */
+vec2 tear(vec2 uv, float amount) {
+  if (amount <= 0.001) return uv;
+  float slice = floor(uTime * 18.0);
+  float band = floor(uv.y * mix(14.0, 46.0, hash11(slice)));
+  // `active` is a reserved word in GLSL ES — this has to be named something else.
+  float torn = step(1.0 - amount * 0.5, hash12(vec2(band, slice)));
+  float shift = (hash12(vec2(band * 1.7, slice * 0.9)) - 0.5) * 0.14 * amount;
+  return vec2(uv.x + shift * torn, uv.y);
+}
+
 void main() {
+  float safe = 1.0 - uReduceFlashing;
+  float glitch = uGlitch * safe;
+
   // Punch in slightly on impacts — a zoom the eye reads as loudness.
-  float zoom = 1.0 - uImpact * 0.012 * (1.0 - uReduceFlashing);
+  float zoom = 1.0 - uImpact * 0.012 * safe;
   vec2 uv = (vUv - 0.5) * zoom + 0.5;
 
-  // Chromatic aberration, strongest at the edges and only during impacts.
-  float ca = uImpact * 0.004 * (1.0 - uReduceFlashing);
+  uv = tear(uv, glitch);
+
+  // Scanline shear: a slow vertical wave that only appears once torn up.
+  uv.x += sin(uv.y * 140.0 + uTime * 9.0) * 0.0022 * glitch;
+
+  // Chromatic separation from both the drop impact and the tearing, strongest
+  // toward the edges of frame where it is least likely to smear detail.
+  float ca = (uImpact * 0.004 + glitch * 0.012) * safe;
   vec2 dir = uv - 0.5;
-  vec3 scene;
+  vec3 src;
   if (ca > 0.0001) {
-    scene.r = texture(uScene, uv + dir * ca).r;
-    scene.g = texture(uScene, uv).g;
-    scene.b = texture(uScene, uv - dir * ca).b;
+    src.r = texture(uSource, uv + dir * ca).r;
+    src.g = texture(uSource, uv).g;
+    src.b = texture(uSource, uv - dir * ca).b;
   } else {
-    scene = texture(uScene, uv).rgb;
+    src = texture(uSource, uv).rgb;
   }
 
-  vec3 vol = texture(uVolumetric, uv).rgb;
   vec3 bloom = texture(uBloom, uv).rgb;
 
-  vec3 col = scene + vol + bloom * uBloomAmount;
-  if (uDebug == 1) col = scene;
-  else if (uDebug == 2) col = vol;
-  else if (uDebug == 3) col = bloom;
+  vec3 col = src + bloom * uBloomAmount;
+  if (uDebug == 1) col = src;
+  else if (uDebug == 2) col = bloom;
   col *= uExposure;
 
   col = acesTonemap(col);
+
+  // Hue rotation on the hardest tears, so a glitch shifts colour as well as
+  // geometry rather than only displacing pixels.
+  if (glitch > 0.35) {
+    float amt = (glitch - 0.35) * 0.9;
+    vec3 shifted = col.gbr;
+    col = mix(col, shifted, amt * 0.5);
+  }
 
   // Vignette.
   float r = length((vUv - 0.5) * vec2(1.0, 0.85));

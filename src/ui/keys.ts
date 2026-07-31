@@ -5,6 +5,7 @@ export interface KeyApi extends PanelApi {
   hazeBurst(): void;
   cameraCut(): void;
   nudgeEnergy(delta: number): void;
+  nudgeTrip(delta: number): void;
 }
 
 const SCENE_KEYS: Record<string, number> = { KeyQ: 0, KeyW: 1, KeyE: 2 };
@@ -108,6 +109,16 @@ export function bindKeys(api: KeyApi, panel: Panel, sceneIds: string[]): () => v
       case 'ArrowDown':
         e.preventDefault();
         api.nudgeEnergy(-0.08);
+        panel.refresh();
+        break;
+      case 'ArrowRight':
+        e.preventDefault();
+        api.nudgeTrip(0.12);
+        panel.refresh();
+        break;
+      case 'ArrowLeft':
+        e.preventDefault();
+        api.nudgeTrip(-0.12);
         panel.refresh();
         break;
       case 'KeyF':

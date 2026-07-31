@@ -1,9 +1,10 @@
 import { Rng } from '../core/rng';
 import { aimDirection, cross, invert, normalize, sub, type Vec3 } from '../core/math';
-import type { Bands } from '../core/types';
+import type { Bands, RGB } from '../core/types';
 import type { FixtureKind, Laser, Rig } from '../lighting/rig';
 import type { SceneDef } from '../scenes';
 import { Camera } from './camera';
+import type { TripLayers } from './trip';
 import {
   bindTexture,
   createFramebuffer,
@@ -30,6 +31,9 @@ import laserFrag from './shaders/laser.frag?raw';
 import bloomDownFrag from './shaders/bloom_down.frag?raw';
 import bloomUpFrag from './shaders/bloom_up.frag?raw';
 import compositeFrag from './shaders/composite.frag?raw';
+import fractalFrag from './shaders/fractal.frag?raw';
+import tripFrag from './shaders/trip.frag?raw';
+import blitFrag from './shaders/blit.frag?raw';
 
 const CHUNKS: Record<string, string> = { common: commonGlsl, fixtures: fixturesGlsl };
 
@@ -51,13 +55,15 @@ interface QualitySettings {
   volScale: number;
   steps: number;
   bloomLevels: number;
+  /** Raymarch steps for the KIFS background. */
+  fractalSteps: number;
 }
 
 const QUALITY_SETTINGS: Record<Quality, QualitySettings> = {
-  low: { renderScale: 0.6, volScale: 0.35, steps: 18, bloomLevels: 3 },
-  medium: { renderScale: 0.85, volScale: 0.5, steps: 30, bloomLevels: 4 },
-  high: { renderScale: 1, volScale: 0.55, steps: 44, bloomLevels: 5 },
-  ultra: { renderScale: 1, volScale: 0.8, steps: 72, bloomLevels: 5 },
+  low: { renderScale: 0.6, volScale: 0.35, steps: 18, bloomLevels: 3, fractalSteps: 26 },
+  medium: { renderScale: 0.85, volScale: 0.5, steps: 30, bloomLevels: 4, fractalSteps: 44 },
+  high: { renderScale: 1, volScale: 0.55, steps: 44, bloomLevels: 5, fractalSteps: 64 },
+  ultra: { renderScale: 1, volScale: 0.8, steps: 72, bloomLevels: 5, fractalSteps: 96 },
 };
 
 export interface FrameState {
@@ -69,6 +75,10 @@ export interface FrameState {
   /** 0..1, spikes on a drop. */
   impact: number;
   reduceFlashing: boolean;
+  /** How far gone the visuals are, and each effect's share of it. */
+  trip: TripLayers;
+  /** Genre palette colour, biasing the fractal so it belongs to this room. */
+  tint: RGB;
 }
 
 /**
@@ -80,8 +90,13 @@ export interface FrameState {
  *   3. laser quads, depth-tested so beams stop at walls but do not write depth
  *   4. volumetric raymarch at reduced resolution, reading scene depth to know
  *      where to stop
- *   5. bloom chain off the combined image
- *   6. composite, tonemap, grade
+ *   5. trip pass — combines scene and volumetric, then warps, mirrors and
+ *      feeds the result back into itself
+ *   6. bloom chain off the tripped image
+ *   7. composite, glitch, tonemap, grade
+ *
+ * A KIFS fractal is drawn behind everything at step 0 when the trip level is
+ * high enough for the walls to have started eroding.
  *
  * Steps 3 and 4 are separate on purpose — see the comment in laser.frag for why
  * lasers are geometry rather than marched.
@@ -112,7 +127,7 @@ export class Renderer {
   fixtureGain = 0.8;
   /** Laser brightness, balanced against the volumetric cones. */
   laserGain = 0.55;
-  /** 0 normal, 1 scene, 2 volumetric, 3 bloom. Isolates a pass for tuning. */
+  /** 0 normal, 1 source only, 2 bloom only. Isolates a pass for tuning. */
   debugView = 0;
 
   private hdrSupported: boolean;
@@ -124,6 +139,9 @@ export class Renderer {
   private bloomDownProgram: WebGLProgram;
   private bloomUpProgram: WebGLProgram;
   private compositeProgram: WebGLProgram;
+  private fractalProgram: WebGLProgram;
+  private tripProgram: WebGLProgram;
+  private blitProgram: WebGLProgram;
 
   private sceneU: UniformCache;
   private crowdU: UniformCache;
@@ -132,6 +150,9 @@ export class Renderer {
   private bloomDownU: UniformCache;
   private bloomUpU: UniformCache;
   private compositeU: UniformCache;
+  private fractalU: UniformCache;
+  private tripU: UniformCache;
+  private blitU: UniformCache;
 
   private fsTriangle: WebGLVertexArrayObject;
 
@@ -150,6 +171,14 @@ export class Renderer {
 
   private sceneFbo: Framebuffer | null = null;
   private volFbo: Framebuffer | null = null;
+  private fractalFbo: Framebuffer | null = null;
+  /**
+   * Ping-pong pair for frame feedback: one holds the previous frame while the
+   * other is written. A single target cannot work — sampling a texture that is
+   * also the current render target is undefined.
+   */
+  private tripFbo: [Framebuffer, Framebuffer] | null = null;
+  private tripIndex = 0;
   private bloomChain: Framebuffer[] = [];
 
   private width = 1;
@@ -193,6 +222,9 @@ export class Renderer {
     this.bloomDownProgram = build(fullscreenVert, bloomDownFrag, 'bloomDown');
     this.bloomUpProgram = build(fullscreenVert, bloomUpFrag, 'bloomUp');
     this.compositeProgram = build(fullscreenVert, compositeFrag, 'composite');
+    this.fractalProgram = build(fullscreenVert, fractalFrag, 'fractal');
+    this.tripProgram = build(fullscreenVert, tripFrag, 'trip');
+    this.blitProgram = build(fullscreenVert, blitFrag, 'blit');
 
     this.sceneU = new UniformCache(gl, this.sceneProgram);
     this.crowdU = new UniformCache(gl, this.crowdProgram);
@@ -201,6 +233,9 @@ export class Renderer {
     this.bloomDownU = new UniformCache(gl, this.bloomDownProgram);
     this.bloomUpU = new UniformCache(gl, this.bloomUpProgram);
     this.compositeU = new UniformCache(gl, this.compositeProgram);
+    this.fractalU = new UniformCache(gl, this.fractalProgram);
+    this.tripU = new UniformCache(gl, this.tripProgram);
+    this.blitU = new UniformCache(gl, this.blitProgram);
 
     this.fsTriangle = createFullscreenTriangle(gl);
 
@@ -367,11 +402,20 @@ export class Renderer {
 
     if (this.sceneFbo) deleteFramebuffer(gl, this.sceneFbo);
     if (this.volFbo) deleteFramebuffer(gl, this.volFbo);
+    if (this.fractalFbo) deleteFramebuffer(gl, this.fractalFbo);
+    if (this.tripFbo) for (const fb of this.tripFbo) deleteFramebuffer(gl, fb);
     for (const fb of this.bloomChain) deleteFramebuffer(gl, fb);
     this.bloomChain = [];
 
     this.sceneFbo = createFramebuffer(gl, this.width, this.height, { depth: true, ...hdr });
     this.volFbo = createFramebuffer(gl, this.width * q.volScale, this.height * q.volScale, hdr);
+    // The fractal is soft and detailed; half resolution is indistinguishable
+    // once it is behind haze and bloom, and it halves the marching cost.
+    this.fractalFbo = createFramebuffer(gl, this.width * q.volScale, this.height * q.volScale, hdr);
+    this.tripFbo = [
+      createFramebuffer(gl, this.width, this.height, hdr),
+      createFramebuffer(gl, this.width, this.height, hdr),
+    ];
 
     let w = Math.max(1, Math.floor(this.width / 2));
     let h = Math.max(1, Math.floor(this.height / 2));
@@ -407,6 +451,29 @@ export class Renderer {
 
     const active = this.packFixtures(rig);
     this.uploadBarTexture(rig);
+    const trip = state.trip;
+
+    // ---- 0. fractal backdrop, drawn into its own half-res target
+    const wantFractal = trip.fractal > 0.01;
+    if (wantFractal) {
+      const ff = this.fractalFbo!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, ff.fbo);
+      gl.viewport(0, 0, ff.width, ff.height);
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.BLEND);
+      gl.useProgram(this.fractalProgram);
+      gl.uniformMatrix4fv(this.fractalU.loc('uInvViewProj'), false, invViewProj);
+      gl.uniform3fv(this.fractalU.loc('uEye'), eye);
+      gl.uniform1f(this.fractalU.loc('uTime'), state.time);
+      gl.uniform1f(this.fractalU.loc('uBeatPhase'), state.beatPhase);
+      gl.uniform1f(this.fractalU.loc('uEnergy'), state.energy);
+      gl.uniform1f(this.fractalU.loc('uTrip'), trip.fractal);
+      gl.uniform1i(this.fractalU.loc('uSteps'), q.fractalSteps);
+      gl.uniform3fv(this.fractalU.loc('uTint'), state.tint);
+      gl.uniform1f(this.fractalU.loc('uAspect'), aspect);
+      gl.bindVertexArray(this.fsTriangle);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
 
     // ---- 1. scene geometry
     gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo.fbo);
@@ -414,6 +481,19 @@ export class Renderer {
     gl.clearColor(0, 0, 0, 1);
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // Lay the fractal down first, with depth off, so it sits at infinity behind
+    // everything. Wherever the walls dissolve, this is what shows through.
+    if (wantFractal) {
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.BLEND);
+      gl.useProgram(this.blitProgram);
+      bindTexture(gl, 0, this.fractalFbo!.color);
+      gl.uniform1i(this.blitU.loc('uSrc'), 0);
+      gl.bindVertexArray(this.fsTriangle);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     gl.depthMask(true);
@@ -436,6 +516,7 @@ export class Renderer {
     gl.uniform1f(this.sceneU.loc('uWallIntensity'), wall?.intensity ?? 0);
     gl.uniform3fv(this.sceneU.loc('uWallColor'), wall?.color ?? [0, 0, 0]);
     gl.uniform1f(this.sceneU.loc('uBarCount'), this.barCount);
+    gl.uniform1f(this.sceneU.loc('uDissolve'), trip.fractal);
     bindTexture(gl, 0, this.barTexture);
     gl.uniform1i(this.sceneU.loc('uBarTex'), 0);
     this.uploadFixtureUniforms(this.sceneU, active);
@@ -504,23 +585,54 @@ export class Renderer {
     gl.bindVertexArray(this.fsTriangle);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // ---- 5. bloom
-    this.renderBloom(sceneFbo);
+    // ---- 5. trip pass: warp, mirror, feed back
+    //
+    // This is also where scene and volumetric are combined, so the warp and the
+    // kaleidoscope fold act on the finished image rather than on one layer of
+    // it — mirroring the beams but not the room would come apart instantly.
+    const tripPair = this.tripFbo!;
+    const dst = tripPair[this.tripIndex];
+    const prev = tripPair[1 - this.tripIndex];
+    this.tripIndex = 1 - this.tripIndex;
 
-    // ---- 6. composite to the screen
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+    gl.viewport(0, 0, dst.width, dst.height);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.tripProgram);
+    bindTexture(gl, 0, sceneFbo.color);
+    gl.uniform1i(this.tripU.loc('uScene'), 0);
+    bindTexture(gl, 1, volFbo.color);
+    gl.uniform1i(this.tripU.loc('uVolumetric'), 1);
+    bindTexture(gl, 2, prev.color);
+    gl.uniform1i(this.tripU.loc('uFeedback'), 2);
+    gl.uniform1f(this.tripU.loc('uTime'), state.time);
+    gl.uniform1f(this.tripU.loc('uAspect'), aspect);
+    gl.uniform1f(this.tripU.loc('uWarp'), trip.warp);
+    gl.uniform1f(this.tripU.loc('uKaleido'), trip.kaleido);
+    gl.uniform1f(this.tripU.loc('uSegments'), trip.segments);
+    gl.uniform1f(this.tripU.loc('uFeedbackAmt'), trip.feedback);
+    gl.uniform1f(this.tripU.loc('uEnergy'), state.energy);
+    gl.uniform1f(this.tripU.loc('uBeatPhase'), state.beatPhase);
+    gl.bindVertexArray(this.fsTriangle);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // ---- 6. bloom, off the tripped image so trails and folds glow too
+    this.renderBloom(dst);
+
+    // ---- 7. composite to the screen
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.useProgram(this.compositeProgram);
-    bindTexture(gl, 0, sceneFbo.color);
-    gl.uniform1i(this.compositeU.loc('uScene'), 0);
-    bindTexture(gl, 1, volFbo.color);
-    gl.uniform1i(this.compositeU.loc('uVolumetric'), 1);
-    bindTexture(gl, 2, this.bloomChain.length > 0 ? this.bloomChain[0].color : sceneFbo.color);
-    gl.uniform1i(this.compositeU.loc('uBloom'), 2);
+    bindTexture(gl, 0, dst.color);
+    gl.uniform1i(this.compositeU.loc('uSource'), 0);
+    bindTexture(gl, 1, this.bloomChain.length > 0 ? this.bloomChain[0].color : dst.color);
+    gl.uniform1i(this.compositeU.loc('uBloom'), 1);
     gl.uniform1f(this.compositeU.loc('uTime'), state.time);
     gl.uniform1f(this.compositeU.loc('uExposure'), this.exposure);
     gl.uniform1f(this.compositeU.loc('uBloomAmount'), this.bloomChain.length > 0 ? this.bloomAmount : 0);
     gl.uniform1f(this.compositeU.loc('uImpact'), state.impact);
+    gl.uniform1f(this.compositeU.loc('uGlitch'), trip.glitch);
     gl.uniform1f(this.compositeU.loc('uGrain'), 0.035);
     gl.uniform1f(this.compositeU.loc('uVignette'), 0.75);
     gl.uniform1f(this.compositeU.loc('uReduceFlashing'), state.reduceFlashing ? 1 : 0);
@@ -530,7 +642,7 @@ export class Renderer {
     gl.bindVertexArray(null);
   }
 
-  private renderBloom(sceneFbo: Framebuffer): void {
+  private renderBloom(source: Framebuffer): void {
     const gl = this.gl;
     if (this.bloomChain.length === 0) return;
 
@@ -540,9 +652,9 @@ export class Renderer {
 
     // Downsample, thresholding only on the first level.
     gl.useProgram(this.bloomDownProgram);
-    let srcTex = sceneFbo.color;
-    let srcW = sceneFbo.width;
-    let srcH = sceneFbo.height;
+    let srcTex = source.color;
+    let srcW = source.width;
+    let srcH = source.height;
     for (let i = 0; i < this.bloomChain.length; i++) {
       const dst = this.bloomChain[i];
       gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
