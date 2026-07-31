@@ -1,0 +1,22 @@
+{
+  "name": "rave-nights",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive rave experience — procedural EDM, volumetric lasers and LED lighting, fully user-controlled.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "shots": "node scripts/screenshots.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}
